@@ -1,0 +1,237 @@
+================================================================================
+  BLOOD STRIKE ESP  --  O QUE FALTA
+  escrito 2026-10-17, no fim da sessão do sweep de fundo
+  alvo: bs_esp.exe (PC / Steam / NetEase Messiah)
+================================================================================
+
+LÊ ISTO PRIMEIRO
+----------------
+
+O estado está SÃO. Compila limpo, os três testes passam, e a infraestrutura que
+faltava (a varredura fora da thread de desenho) está feita e provada no log.
+O que NÃO está resolvido é uma coisa só: **os candidatos que o pool retém não
+têm posição utilizável**, e por isso não aparecem caixas.
+
+Não recomeces de zero. O problema está bem isolado -- ver o PASSO 1.
+
+--------------------------------------------------------------------------------
+  ESTADO DO BINÁRIO NESTE MOMENTO
+--------------------------------------------------------------------------------
+
+  bs_esp.exe    -- compila limpo, arranca, overlay funcional, fps 44-75
+  bone_find.exe -- compila limpo, pronto a correr (precisa de elevação)
+  premul_test   -- 18432 casos, 0 falhas
+  aim_test      -- 0 falhas
+  skeleton_filter_test -- 0 falhas
+
+  O que FUNCIONA, confirmado no log:
+    * overlay apresenta a 44-75 fps
+    * a varredura de fundo varre 2227 MB SEM congelar o overlay (fps 73 durante)
+    * detecção de entrada/saída de partida
+    * blanking em morte (fov 54.6 -> 40.0 -> blanked)
+    * o frontend (menu) está completo
+    * o aim assist está ligado mas DESACTIVADO por omissão
+
+  Jogo e bs_esp estão ambos parados agora. Nada a correr.
+
+--------------------------------------------------------------------------------
+  PASSO 1 -- O ÚNICO BLOQUEIO REAL: as caixas não aparecem
+--------------------------------------------------------------------------------
+
+  O SINTOMA, dito com números:
+
+      [pool] 3 candidates kept
+      [live] fps 59  tracked 1  within 200m 0  on-screen 0  nearest -1.0m
+
+  `tracked 1` e `within 200m 0` -- o único actor tem distância inválida.
+  O `[body]` desta build nunca chegou a imprimir.
+
+  O QUE JÁ ESTÁ DESCARTADO (não gastes tempo aqui):
+
+    * NÃO são os ossos. Estão provados: a linha [body] de uma corrida anterior
+      imprimiu  pos-root 0.116  head-pos 2.158  head.y 2.424  root.y 0.150.
+      Esses são exactamente os valores que a secção 0.3 do ANALISIS fixou como
+      prova (raiz a 12 cm dos pés, cabeça a 2,16 m). Os offsets
+      off::BoneRoot=0x208 / off::BoneHead=0x214 estão CERTOS.
+
+    * NÃO é o filtro de esqueleto. Ele deixa passar o actor real -- está a
+      funcionar como desenhado.
+
+    * NÃO é o pool que não cresce. Isso ERA o problema e está CORRIGIDO nesta
+      sessão (sweep de fundo + merge, ver secção 0.6 do ANALISIS).
+
+  DUAS HIPÓTESES, e são distinguíveis com uma corrida:
+
+    HIPÓTESE 1 -- O build_pool inicial corre cedo demais.
+      A varredura corre no instante de `[match] entered a match`, quando a
+      cadeia do `local_` pode ainda não ter estabilizado. Noutras corridas o
+      local_ leu (0,0,0) exactamente nesse instante. Se o pool nasce a partir
+      de uma leitura má, nasce mal.
+
+    HIPÓTESE 2 -- A assinatura +0x3E0 == 2 já não é a certa.
+      Os números incomodam: 104958 passam o teste de 9,3 milhões (1,1%), e
+      desses só 1023 têm posição legível (0,0097%). Isso é ruído, não uma
+      assinatura. O próprio código admite que o campo é fraco -- ver o
+      comentário em off::EntField.
+
+  COMO DISTINGUIR -- faz isto:
+
+    1. Lança o jogo e o bs_esp:
+         um cmd ELEVADO, cd <repo>\out, .\bs_esp.exe --ulw
+
+    2. Entra numa partida e FICA VIVO E A ANDAR pelo menos 60 segundos.
+       Não morras. Não voltes ao menu.
+
+    3. Apanha estas linhas do log (na pasta out\ do repo):
+         Select-String -Path .\out\vex_log.txt -Pattern "\[pool\]|\[body\]|\[live\]"
+
+  O QUE A LEITURA DIZ:
+
+    * Se aparecer `[body] ... pos-root 0.116 ... head-pos 2.158`
+        -> HIPÓTESE 1. Os candidatos estão certos, é temporização. Correcção:
+           no bs_esp.cpp, linha ~2823 (bloco `waiting_for_match_`), a chamada
+           `build_pool()` deve ser adiada até a cadeia estar estável -- por
+           exemplo exigir que o local_ leia uma posição válida em DOIS frames
+           consecutivos antes de varrer, em vez de um.
+
+    * Se o `[body]` NÃO aparecer e o pool continuar com 1-3 candidatos
+        -> HIPÓTESE 2. A assinatura está errada. Correcção: medir a assinatura
+           outra vez. É o que o `bone_find` faz para os ossos; precisa do mesmo
+           para o campo +0x3E0. Ver PASSO 2.
+
+--------------------------------------------------------------------------------
+  PASSO 2 -- Se for a hipótese 2: medir a assinatura
+--------------------------------------------------------------------------------
+
+  O bone_find.exe já está escrito e compila. Ele procura a array de ossos por
+  translação partilhada (todos os ossos de um esqueleto movem-se juntos).
+
+  IMPORTANTE -- o bone_find JÁ CORREU DUAS VEZES e a conclusão foi limpa:
+  ZERO em 4 objectos x 5 strides x 2240 offsets, com o jogador a mover-se em
+  121 de 200 frames. Isso estabelece que os ossos NÃO estão nos objectos da
+  cadeia de posição (LocalPlayer, ActorInstance, ActorProps, Component), e o
+  IEntity ficou `unresolved` (Component+0x40 devolveu 0, que o pos_find já
+  documentou como intermitente neste build).
+
+  OU SEJA: não vale a pena re-correr o bone_find como está. Ele já provou o que
+  tinha a provar. O que falta é uma ferramenta DIFERENTE:
+
+    * para a hipótese 2, uma que meça o campo +0x3E0 e encontre o verdadeiro
+      discriminador de "é um actor" -- o actual é claramente fraco.
+
+  NOTA: os offsets dos ossos (0x208/0x214) NÃO precisam de ser re-medidos. Já
+  estão certos e provados.
+
+--------------------------------------------------------------------------------
+  PASSO 3 -- Só depois das caixas: o resto da ordem acordada
+--------------------------------------------------------------------------------
+
+  A ordem que ficou combinada, e ainda válida:
+
+    1. overlay            -- FEITO
+    2. caixas certas      -- BLOQUEADO (PASSO 1 acima)
+    3. frontend           -- FEITO
+    4. bones medidos      -- ossos 0x208/0x214 provados; skeleton ainda não
+    5. aim assist real    -- estrutura pronta, desactivado por omissão
+
+  Depois das caixas aparecerem:
+
+    3a. SKELETON -- desenhar o esqueleto. Precisa dos offsets de TODOS os
+        ossos, não só root e head. O bone_find encontra uma RUN de ossos se
+        existir; como devolveu 0, a abordagem terá de ser outra (seguir
+        ponteiros para fora dos objectos da cadeia).
+
+    3b. AIM ASSIST -- ligar de verdade. A matemática está testada (aim_test,
+        0 falhas) e a estrutura está em aim.hpp/aim.cpp. Falta:
+          - validar o aim_step contra alvos reais
+          - o portão de foco e de tecla já existe
+        AVISO: o NEProtect (0x6CFCB3D) monitoriza o rato e enumera janelas.
+        Aim assist com movimento de rato é MAIS detectável que escrever ângulo
+        na memória. Usa conta descartável.
+
+--------------------------------------------------------------------------------
+  PERFORMANCE -- o que ainda está por afinar
+--------------------------------------------------------------------------------
+
+  O [present] varia entre 9,9 e 37,6 ms (o pior caso dá 27 fps de tecto).
+  O premultiply está DESCARTADO como gargalo -- mede 2,6 ms/frame
+  (premul_bench: heap 2,661 / dib 2,601).
+
+  Suspeitos que restam, por ordem:
+    1. `Map` do DIB
+    2. `UpdateLayeredWindow` (ulw)
+  O log imprime agora `copy/map/premul/ulw` separados -- lê a linha
+  `[present] cpu path: ... (copy X map Y premul Z ulw W)` para decidir.
+
+  Se o `ulw` dominar: apresentar do staging directamente em vez de escrever
+  num DIB.
+
+--------------------------------------------------------------------------------
+  ARMADILHAS CONHECIDAS -- não voltes a cair nestas
+--------------------------------------------------------------------------------
+
+  * WS_EX_NOREDIRECTIONBITMAP é incompatível com este present path -- trava o
+    primeiro Present. O caminho é LAYERED_CPU (--ulw).
+  * A matriz da câmara é COLUMN-major com sign -1. É CONSTANTE MEDIDA
+    (kForwardSign/kColMajor). Não voltes a votar isto.
+  * SetWindowPos(HWND_TOPMOST) por frame perturba o raw input.
+  * ShowWindow é um evento de activação -- usa só na transição, não por frame.
+  * AttachThreadInput quebrou os botões do menu.
+  * `taskkill` sem elevação dá "Acesso negado" no bs_esp.
+  * O estande de tiro tem bots PARADOS -- dados de lá não valem para movimento.
+  * O bone_find precisa que ANDES em linha recta. Jogador parado dá sinal fraco
+    e o veredicto dele diz isso explicitamente.
+  * O launch.ps1 foi reordenado mas NUNCA foi revalidado. O caminho directo
+    (cmd elevado -> .\bs_esp.exe --ulw) funciona sempre.
+
+--------------------------------------------------------------------------------
+  COMANDOS ÚTEIS
+--------------------------------------------------------------------------------
+
+  Compilar (não precisa de elevação):
+    $vc="C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+    cmd /c ""$vc" >nul 2>&1 && cmake --build build --config Release --target bs_esp"
+
+  Correr (PRECISA de elevação -- OpenProcess em processo protegido):
+    cmd elevado -> cd <repo>\out -> .\bs_esp.exe --ulw
+
+  Ler o log (não precisa de elevação):
+    Get-Content <repo>\out\vex_log.txt | Select-Object -Last 40
+
+  Testes (não precisam do jogo nem de elevação):
+    .\out\premul_test.exe
+    .\out\aim_test.exe
+    .\out\skeleton_filter_test.exe
+
+  Matar o bs_esp (precisa de elevação):
+    taskkill /F /IM bs_esp.exe   num cmd de administrador
+
+--------------------------------------------------------------------------------
+  FICHEIROS
+--------------------------------------------------------------------------------
+
+  src\bs_esp.cpp        pipeline ESP, build_pool, sweep de fundo, draw_esp
+  src\bs_esp.hpp        off::*, Settings, classe Esp
+  src\overlay.cpp       present_cpu, premultiply_row SSE2, create_gdi_surface
+  src\menu.cpp\hpp      frontend completo
+  src\aim.cpp\hpp       aim assist (estrutura + matemática)
+  src\bone_find.cpp     medidor de ossos por translação partilhada
+  src\pos_find.cpp      template do método de diferencial temporal
+  BLOODSTRIKE_ANALYSIS.md   REGISTO AUTORITATIVO -- secção 0.6 é a mais recente
+  out\vex_log.txt       log ao vivo, flush por linha
+
+--------------------------------------------------------------------------------
+  O QUE ESTÁ PROVADO, PARA NÃO O VOLTARES A QUESTIONAR
+--------------------------------------------------------------------------------
+
+  LocalPlayer+0x7C     = posição (não 0x1C0)
+  ActorProps           = 0x88   (não 0x3B8, não 0x48)
+  Component+0x40       = IEntity, INTERMITENTE neste build
+  BoneRoot             = 0x208
+  BoneHead             = 0x214
+  matriz da câmara     = COLUMN-major, sign -1
+  câmara lida em       = +0x7C a +0x458, 0x3DC bytes, UMA syscall contígua
+  pos.y - root.y       = 0.116  (pés à raiz do esqueleto)
+  head.y - pos.y       = 2.158  (cabeça a 2,16 m dos pés)
+
+================================================================================

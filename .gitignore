@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+#  Build artifacts
+# ---------------------------------------------------------------------------
+build/
+dist/
+bin/
+out/
+*.obj
+*.tlog
+*.log
+*.ilk
+*.pdb
+*.exe
+*.dll
+*.sys
+
+# ---------------------------------------------------------------------------
+#  SECRETS -- never commit these.
+#
+#  sign\*.pfx contains a PRIVATE KEY. If it is pushed, anyone can sign a kernel
+#  driver as if trusted by your machine. Regenerate it locally with
+#  sign\sign_driver.bat (it prompts for VEXDRV_PFX_PASS, no password is stored
+#  in the tree).
+# ---------------------------------------------------------------------------
+*.pfx
+*.cer
+*.pem
+*.key
+*_private*
+
+# Game runtime dumps that are not source
+*.mpk
+
+# ---------------------------------------------------------------------------
+#  Editor / OS noise
+# ---------------------------------------------------------------------------
+.vs/
+.vscode/
+*.user
+Thumbs.db
+desktop.ini
